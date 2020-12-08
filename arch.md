@@ -7,7 +7,7 @@
 	从`port` flag、环境变量`SMUDGE_LISTEN_PORT`读取，如都没有则采用默认值9999
 	1. `hbf`: heart beat frequency (milli seconds)  
 	从`hfb` flag，环境变量`SMUDGE_HEARTBEAT_MILLIS`读取读取，如都没有则采用默认值500毫秒
-1. 获取首个非loopback ip地址，优先选择ipv6，不存在ipv6地址的情况下选择ipv4
+1. 获取首个非loopback ip地址，优先选择ipv6，不存在ipv6地址则选择ipv4
 1. 将前面读到的listen port, heart beat frequency, 和ip地址设置到一些全局变量中(properties.go)
 1. 如果前面读到的node address不为空，则根据node address创建node，表示当前节点是否要参加gossip？下面必然会创建一个`thisHost`所以这里的node为可选  
 这里仅创建node结构体对象，设置其ip、port、timestamp（置为当前时间）、pingmillis。node的`status`初始化为默认值`StatusUnknown`
@@ -21,17 +21,73 @@
 	1. 将node对象加入到`knownNodes`里  
 	`knownNodes`是定义在registry.go中的全局变量，是一个带读写同步锁的map: `map[string]*Node`,表示所有已知node，包括living和dead。
 	1. 将node状态更新的事件通知所有status listener（调用`StatusListener`的`OnChange`函数）
-1. 调用smudge包里的`Begin`函数，监听UDP端口，开始heartbeat  
-	1. 初始化全局host环境  
+1. 调用smudge包里的`Begin`函数，完成本host初始化，启动所有逻辑线  
+	1. 初始化本节点host环境  
 		1. 配置全局变量`thisHost`，将之初始化为如下node对象：  
 			1. ip：如果之前ip没有获得，则设置为`SMUDGE_LISTEN_IP`者认值（127.0.0.1）
 			1. port：如果之前的port没有得到，则设置为`SMUDGE_LISTEN_PORT`或默认值（9999）
 			1. timestamp为当前时间
 			1. pingMillis为`PingNoData`
 		1. 配置全局变量`thisHostAddress`为`thisHost`的ip:port
-	1. 将`thisHost`的状态设置为`StatusAlive`，`heartbeat`为0
-	1. 调用`AddNode`将thisHost也加入进去
-	1. 启动goroutine,执行`listenUDP`函数。该方法除了执行`net.ListenUDP`之外，还执行死循环从`UDPConn`读取消息，每次收到一条消息就启动goroutine执行`receiveMessageUDP(addr, buf)`。其中`addr`是方的udp地址，buf是消息
-	1. 用`AddNode`函数将所有initial host入到`updatedNodes`和`knownNodes`中。可以通过环境变量`SMUDGE_INITIAL_HOSTS`为当前主机指定集群中已知的host。所以在smudge中的member的粒度是host
-## 主要逻辑
-### UDP消息处理
+		1. 将`thisHost`的状态设置为`StatusAlive`，`heartbeat`为0
+		1. 调用`AddNode`将`thisHost`也加入进去
+	1. 加入集群中已知节点  
+	smudge可以通过环境变量`SMUDGE_INITIAL_HOSTS`将集群中已知的host告诉当前节点。这里用`AddNode`函数将所有initial host入到`updatedNodes`和`knownNodes`中。
+	1. 启动所有流程，内容将在下节描述
+
+## 主要概念
+
+### host和node
+在registry中的`knownNodes`和`updatedNodes`管理的都是node，所以说member管理管的是node。
+
+而在smudge中，使用`SMUDGE_INITIAL_HOSTS`可以指定集群中已有member，所以可以说host是node的同义词。支持这种说法的另外一个证据是`thisHost`在前面被初始化为一个node
+
+### node的定义
+```go
+// node.go
+type Node struct {
+	ip           net.IP
+	port         uint16
+	timestamp    uint32
+	address      string
+	pingMillis   int
+	status       NodeStatus
+	emitCounter  int8
+	heartbeat    uint32
+	statusSource *Node
+}
+```
+说明如下：
+1. node的状态（status）定义在`nodeStatus.go`中，包括：
+	* Unknown: the default node status of newly-created nodes.
+	* Alive: a node is alive and healthy
+	* Suspected: a node is suspected of being dead
+	* Dead: a node is dead and no longer healthy
+	* ForwardTo: a pseudo status used by message to indicate the target of a ping request
+1. emitCounter  
+The number of times any node's new status should be emitted after changes。被初始化为lambda * log(node count)，其中lamda是常量2.5，node count是`knownNodes`的大小。
+1. heartbeat  
+1. statusSource  
+
+### 消息格式
+smudge使用下面的结构体表示消息
+```go
+//message.go
+type message struct {
+	sender          *Node
+	senderHeartbeat uint32
+	verb            messageVerb
+	members         []*messageMember
+	broadcast       *Broadcast
+}
+```
+解释如下：
+1. `verb`: 表示消息类型，类型可以为`verbPing`、`verbAck`、`verbPingRequest`、`verbNonForwardingPing`
+1. `members`: 消息携带的member状态信息，信息包括信息来源和node的heartbeat、status。每条消息最多可以携带62个（含）member的状态信息。关于这个magic number解释在message.go的`addMember`方法中
+1. `broadcast`: 消息携带的广播信息,每条消息仅可携带一个广播消息
+
+## 主要流程
+`membership`包的`Begin`函数启动了smudge的各条主要流程，分析如下：
+
+### 侦听UDP，处理接收到的UDP消息
+启动goroutine,执行`listenUDP`函数。该方法除了执行`net.ListenUDP`之外，还执行死循环从`UDPConn`读取消息，每次收到一条消息就启动goroutine执行`receiveMessageUDP(addr, buf)`。其中`addr`是消息发送方的udp地址（内部封装了一个`syscall.SocketaddrInet4`或`SocketadrInet6`及端口），buf是消息
