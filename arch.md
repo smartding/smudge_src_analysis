@@ -21,7 +21,7 @@
 	1. 将node对象加入到`knownNodes`里  
 	`knownNodes`是定义在registry.go中的全局变量，是一个带读写同步锁的map: `map[string]*Node`,表示所有已知node，包括living和dead。
 	1. 将node状态更新的事件通知所有status listener（调用`StatusListener`的`OnChange`函数）
-1. 调用smudge包里的`Begin`函数，完成本host初始化，启动所有逻辑线  
+1. 调用smudge包里的`Begin`函数，完成本host初始化，启动主要流程处理逻辑  
 	1. 初始化本节点host环境  
 		1. 配置全局变量`thisHost`，将之初始化为如下node对象：  
 			1. ip：如果之前ip没有获得，则设置为`SMUDGE_LISTEN_IP`者认值（127.0.0.1）
@@ -33,7 +33,7 @@
 		1. 调用`AddNode`将`thisHost`也加入进去
 	1. 加入集群中已知节点  
 	smudge可以通过环境变量`SMUDGE_INITIAL_HOSTS`将集群中已知的host告诉当前节点。这里用`AddNode`函数将所有initial host入到`updatedNodes`和`knownNodes`中。
-	1. 启动所有流程，内容将在下节描述
+	1. 启动主要流程理逻辑，内容将在下节描述
 
 ## 主要概念
 
@@ -82,12 +82,16 @@ type message struct {
 }
 ```
 解释如下：
-1. `verb`: 表示消息类型，类型可以为`verbPing`、`verbAck`、`verbPingRequest`、`verbNonForwardingPing`
+1. `verb`: 表示消息类型，类型可以为:  
+	1. `verbPing`: 普通的ping消息
+	1. `verbAck`： 作为对ping消息的正常响应
+	1. `verbPingRequest`：当更早的ping消息没有受到ack时，发pingreq给其他node，要求其代为转发ping
+	1. `verbNonForwardingPing`: 转发的ping，如果该消息没有收到ack,则不会再次发起pingreq
 1. `members`: 消息携带的member状态信息，信息包括信息来源和node的heartbeat、status。每条消息最多可以携带62个（含）member的状态信息。关于这个magic number解释在message.go的`addMember`方法中
 1. `broadcast`: 消息携带的广播信息,每条消息仅可携带一个广播消息
 
-## 主要流程
-`membership`包的`Begin`函数启动了smudge的各条主要流程，分析如下：
+## 主要流程处理逻辑
+`membership`包的`Begin`函数除了初始化本地节点，还启动了smudge的各主要流程处理逻辑，分析如下：
 
-### 侦听UDP，处理接收到的UDP消息
-启动goroutine,执行`listenUDP`函数。该方法除了执行`net.ListenUDP`之外，还执行死循环从`UDPConn`读取消息，每次收到一条消息就启动goroutine执行`receiveMessageUDP(addr, buf)`。其中`addr`是消息发送方的udp地址（内部封装了一个`syscall.SocketaddrInet4`或`SocketadrInet6`及端口），buf是消息
+### 侦听UDP端口，处理接收到的UDP消息
+启动goroutine,执行`listenUDP`函数。该方法除了执行`net.ListenUDP`来监听启动时获得的UDP端口之外，还执行死循环从`UDPConn`读取消息。每收到一条消息就启动goroutine执行`receiveMessageUDP(addr, buf)`。其中`addr`类型为`UDPAddr`，是消息发送方的udp地址（内部封装了一个叫`IP`的byte slice存储ipv4或ipv6地址及端口），`buf`是消息内容。
