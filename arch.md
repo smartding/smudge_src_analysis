@@ -106,11 +106,11 @@ type message struct {
 ### 周期性ping群中所有node（不包含自身）并在ping的同时附带传播最近更新的node状态和广播
 这个逻辑直接写在`Begin`函数内，在一个死循环内执行个个“ping周期”。每个ping周期挑选一部分已知节点ping一轮，逻辑如下：
 1. 生成不包含本地node的所有已知node列表（dead & living），node列表通过range map得到，本身每次执行都能得到随机顺序，并再次随机交换node顺序到更为随机的列表
-1. 对于列表中的每个node：  
-如果目标node状态为`StatusDead`，每次ping之后都要跳过后续连续的若干次ping周期，跳过的次数为`retryCountdown`，计算方法为2的retry次方，所以是一种指数退避。一旦retry次数到达硬编码的`maxDeadNodeRetries`=10次，就将该node从`deadNodeRetries` map里删除，并从`knownNodes`中删除。对于非dead node,则直接ping  
+1. ping列表中的每个node：  
+如果目标node状态为`StatusDead`，每次ping之后都要跳过后续连续的若干次ping周期，跳过的次数为`retryCountdown`，计算方法为2的retry次方，所以是一种指数退避。一旦retry次数到达硬编码的`maxDeadNodeRetries`（10）次，就将该node从`deadNodeRetries` map里删除，并从`knownNodes`中删除。对于非dead node,则直接ping  
 ping某个node的流程为：  
-	1. currentHeartBeat++
-	1. `PingNode`: 以对方node的address拼接`currentHeartBeat`构成的string为key,在`pendingAcks`里存入`pendingAck`对象，表示正在进行的一个ping某个node的任务，后续可能需要处理其超时问题。然后执行`transmitVerbGenericUDP`。该函数发出的ping消息中会带上`lambda * log(node count)`个本地最近有状态更新的成员（`emitCounter`>0）。这些成员从`updatedNodes`里按照`emitCounter`从高到低挑出来，不包含本地node和目的地node。只挑选`emitCounter`为正的node，每次某个node作为ping的加信息的发出去之后，node的`emitCounter`就会减一，一旦`emitCounter`变为0,就会从`updatedNodes`中删除。因此某个node状态被更新的事件只会通知`emitCounter`个ping对象，而不是`emitCounter`个ping周期。万一无法从`updatedNodes`中找到符合条件的node,就从`knownNodes`中找相同数量的node作为ping的附加member信息。可见状态不变的node的信息还是会同步到别的node中，只是机会少一些。
+	1. `currentHeartBeat`++
+	1. `PingNode`: 以对方node的address拼接`currentHeartBeat`构成的string为key,在`pendingAcks`里存入`pendingAck`对象，表示正在进行的一个ping某个node的任务，后续可能需要处理其超时问题。然后执行`transmitVerbGenericUDP`。该函数发出的ping消息中会带上`lambda * log(node count)`个本地最近有状态更新的成员（即`emitCounter`大于零的成员）。这些成员从`updatedNodes`里按照`emitCounter`从高到低挑出来，不包含本地node和目的地node。每次某个node的状态作为ping的加信息的发出去之后，该node的`emitCounter`就会减一，一旦`emitCounter`变为0,就会从`updatedNodes`中删除。因此某个node状态被更新的事件只会通知`emitCounter`个ping对象，而不是`emitCounter`个ping周期。万一无法从`updatedNodes`中找到符合条件的node,就从`knownNodes`中找相同数量的node作为ping的附加成员状态更新。可见状态不变的node的信息还是有机会同步到别的node中，只是机会少一些。
 	1. sleep由`hbf` flag或环境变量指定的毫秒数
 
-如果上述ping的过程中修改了`knownNodes`，则打断当前ping周期，进入下一个ping周期。如果整个ping周期内都没有ping任何node（`pingCounter`=0）,则sleep由`hbf` flag或环境变量指定的毫秒数
+如果上述ping的过程中修改了`knownNodes`，则打断当前ping周期，重新生成ping的对象列表，进入下一个ping周期。如果整个ping周期内都没有ping任何node（`pingCounter`=0）,则sleep由`hbf` flag或环境变量指定的毫秒数
