@@ -96,9 +96,25 @@ type message struct {
 启动goroutine,执行`listenUDP`函数。该方法除了执行`net.ListenUDP`来监听启动时获得的UDP端口值之外，还执行死循环从`UDPConn`读取消息。每收到一条消息就启动goroutine执行`receiveMessageUDP(addr, buf)`。其中`addr`类型为`net`包下的`UDPAddr`，是消息发送方的udp地址（封装了一个叫`IP`的byte slice存储ipv4或ipv6地址及端口），`buf`是消息内容。`receiveMessageUDP`处理流程如下：
 1. decode UDP消息为`message`对象
 1. 更新本地heartbeat todo这个做什么的？
-1. 如果消息包含member状态更新，则更新本地member状态
+1. 更新本地关于消息发送者和消息中携带的member的状态
 1. 如果消息包含广播消息，则处理广播消息
-1. 根据消息类型（`message.verb`），做后续处理
+1. 根据消息类型（`message.verb`），做后续处理。这里处理的消息类型包括 `verbPing`、 `verbAck`、 `verbPingRequest`、 `verbNonForwardingPing`，具体处理逻辑见后续各小节。
+
+#### `verbPing`消息的处理
+
+调用`transmitVerbGenericUDP`返回ack。注意这里发UDP消息用的`code`或者说发送出去的消息的`senderHeartbeat`就是ping消息中带的`senderHeartbeat`。所以`senderHeartbeat`不可以直观理解为消息发送者在发送消息时的`currentHeartBeat`，可以将heartbeat认为是一种transaction id，比如作为ping的发送者，当你收到ack时，通过ack消息中带的`senderHeartbeat`可以知道这个ack是相应之前发出的哪个ping。heartbeat并不是gossip协议的一部分，只是内部的机制，用来把收到的消息和发出的消息对应起来。
+
+#### `verbAck`消息的处理
+
+根据sender的address拼接消息中包含的`senderHeartbeat`作为key，寻找`pendingAcks`中是否有之前发出的ping消息与之对应。如果找到了，则：
+1. 更新本地关于sender的`timestamp`为当前时间。
+1. 如果收到的ack为对之前发出的pingreq消息的响应，发ack消息给pingreq消息的发送者。
+1. 最后步骤是统计ping的响应时间（当前时间减去ping消息发出的时间），低于最小ping响应时间（这个时间可以用`SMUDGE_MIN_PING_TIME`环境变量指定，默认为150毫秒）的响应时间会被算作最小ping响应时间（这个设计的作用在于prevents the system instability and flapping that can come from consistently small values）。
+1. 完成之后将之前的`pendingAck`对象从`pendingAcks`表中删除。
+
+#### `verbPingRequest`消息的处理
+
+#### `verbNonForwardingPing`消息的处理
 
 ### 处理ping超时
 在单独goroutine里执行`startTimeoutCheckloop`函数，处理3类ping消息的超时
