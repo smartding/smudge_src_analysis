@@ -95,7 +95,7 @@ type message struct {
 ### 侦听UDP端口，处理接收到的UDP消息
 启动goroutine,执行`listenUDP`函数。该方法除了执行`net.ListenUDP`来监听启动时获得的UDP端口值之外，还执行死循环从`UDPConn`读取消息。每收到一条消息就启动goroutine执行`receiveMessageUDP(addr, buf)`。其中`addr`类型为`net`包下的`UDPAddr`，是消息发送方的udp地址（封装了一个叫`IP`的byte slice存储ipv4或ipv6地址及端口），`buf`是消息内容。`receiveMessageUDP`处理流程如下：
 1. decode UDP消息为`message`对象
-1. 更新本地heartbeat todo这个做什么的？
+1. 更新本地heartbeat todo这个做什么的？如果把heartbeat当成一种内部的transaction id,为什么要更新？一直++不好吗？
 1. 更新本地关于消息发送者和消息中携带的member的状态
 1. 如果消息包含广播消息，则处理广播消息
 1. 根据消息类型（`message.verb`），做后续处理。这里处理的消息类型包括 `verbPing`、 `verbAck`、 `verbPingRequest`、 `verbNonForwardingPing`，具体处理逻辑见后续各小节。
@@ -130,3 +130,11 @@ ping某个node的流程为：
 	1. sleep由`hbf` flag或环境变量指定的毫秒数
 
 如果上述ping的过程中修改了`knownNodes`，则打断当前ping周期，重新生成ping的对象列表，进入下一个ping周期。如果整个ping周期内都没有ping任何node（`pingCounter`=0）,则sleep由`hbf` flag或环境变量指定的毫秒数
+
+### 本地member状态更新
+
+todo 包含那些状态？
+
+### 广播消息处理
+
+todo
